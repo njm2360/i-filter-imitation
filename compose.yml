@@ -1,0 +1,49 @@
+services:
+
+  proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      LISTEN_ADDR: ":8080"
+      CA_CERT: /data/ca/ca.crt
+      CA_KEY: /data/ca/ca.key
+      REDIS_URL: redis://redis:6379
+      CLAMD_ADDR: tcp://clamav:3310
+      SCAN_MAX_SIZE_MB: "500"
+      SCAN_TEMP_DIR: /tmp/scan
+      SCAN_TTL_MINUTES: "60"
+      PROXY_ADDR: "http://localhost:8080"
+      # BLOCK_LIST:       /data/blocklist.txt
+      # SYSLOG_NET:       udp
+      # SYSLOG_ADDR:      syslog:514
+    volumes:
+      - ca_data:/data/ca
+      # - ./blocklist.txt:/data/blocklist.txt:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      clamav:
+        condition: service_started
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  clamav:
+    image: clamav/clamav:stable
+    environment:
+      CLAMD_CONF_StreamMaxLength: 500M
+    volumes:
+      - clamav_db:/var/lib/clamav
+
+volumes:
+  ca_data:
+  redis_data:
+  clamav_db:
