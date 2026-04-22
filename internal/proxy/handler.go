@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/njm2360/i-filter-imitation/internal/cert"
@@ -22,6 +23,7 @@ type Server struct {
 	certCache   *cert.Cache
 	sender      *logger.Sender
 	tt          *timedTransport
+	transport   http.RoundTripper // scanTransport or timedTransport; used by serveConnLoop
 	rp          *httputil.ReverseProxy
 	blocklist   *Blocklist
 	scanHandler http.Handler
@@ -32,6 +34,17 @@ type Server struct {
 // proxyAddr is the externally reachable address of this proxy (e.g. "http://192.168.1.1:8080"),
 // embedded in the scan-result HTML so the browser can fetch scan status directly.
 // pacContent may be nil to disable PAC file serving.
+const transportBufSize = 256 * 1024 // 256 KB — reduces syscall count ~64x vs the 4 KB default
+
+// rpBufPool provides reusable copy buffers for httputil.ReverseProxy to avoid
+// per-request heap allocations when streaming response bodies.
+var rpBufPool = &sync.Pool{New: func() any { b := make([]byte, transportBufSize); return &b }}
+
+type bufPool struct{}
+
+func (bufPool) Get() []byte        { return *rpBufPool.Get().(*[]byte) }
+func (bufPool) Put(b []byte)       { rpBufPool.Put(&b) }
+
 func NewServer(cc *cert.Cache, sender *logger.Sender, bl *Blocklist, mgr *scan.Manager, proxyAddr string, pacContent []byte) *Server {
 	base := &http.Transport{
 		DialContext: (&net.Dialer{
@@ -39,18 +52,26 @@ func NewServer(cc *cert.Cache, sender *logger.Sender, bl *Blocklist, mgr *scan.M
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		TLSHandshakeTimeout: 10 * time.Second,
+		ReadBufferSize:      transportBufSize,
+		WriteBufferSize:     transportBufSize,
+		// Disable transparent gzip decompression: a MITM proxy must not alter
+		// content negotiation between client and server. Without this, Transport
+		// strips Content-Length (sizes differ after decompress), forcing the inner
+		// http.Server into chunked transfer encoding on every response.
+		DisableCompression: true,
 	}
 	tt := &timedTransport{base: base}
 
-	var transport http.RoundTripper = tt
+	var tr http.RoundTripper = tt
 	var scanHandler http.Handler = http.NotFoundHandler()
 	if mgr != nil {
-		transport = &scanTransport{next: tt, manager: mgr, proxyAddr: proxyAddr}
+		tr = &scanTransport{next: tt, manager: mgr, proxyAddr: proxyAddr}
 		scanHandler = scan.NewHandler(mgr)
 	}
 
 	rp := &httputil.ReverseProxy{
-		Transport: transport,
+		Transport:  tr,
+		BufferPool: bufPool{},
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			// scheme and host are set by handlePlain before the proxy is invoked
 			pr.Out.URL.Scheme = pr.In.URL.Scheme
@@ -59,7 +80,7 @@ func NewServer(cc *cert.Cache, sender *logger.Sender, bl *Blocklist, mgr *scan.M
 		},
 	}
 
-	return &Server{certCache: cc, sender: sender, tt: tt, rp: rp, blocklist: bl, scanHandler: scanHandler, pacContent: pacContent}
+	return &Server{certCache: cc, sender: sender, tt: tt, transport: tr, rp: rp, blocklist: bl, scanHandler: scanHandler, pacContent: pacContent}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
