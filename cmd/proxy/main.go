@@ -28,6 +28,7 @@ func main() {
 	syslogNet := envOr("SYSLOG_NET", "udp")
 	syslogAddr := envOr("SYSLOG_ADDR", "")
 	blockListPath := envOr("BLOCK_LIST", "")
+	pacFilePath := envOr("PAC_FILE", "")
 
 	ca, err := cert.LoadOrCreate(caCertPath, caKeyPath)
 	if err != nil {
@@ -68,6 +69,16 @@ func main() {
 		slog.Info("scan enabled", "clamd", clamdAddr, "max_mb", maxMB, "proxy_addr", proxyAddr)
 	}
 
+	var pacContent []byte
+	if pacFilePath != "" {
+		pacContent, err = os.ReadFile(pacFilePath)
+		if err != nil {
+			slog.Error("failed to read PAC_FILE", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("PAC file loaded", "path", pacFilePath)
+	}
+
 	cache := cert.NewCache(ca, rdb)
 	var sender *logger.Sender
 	if syslogAddr != "" {
@@ -78,7 +89,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    listenAddr,
-		Handler: proxy.NewServer(cache, sender, bl, mgr, proxyAddr),
+		Handler: proxy.NewServer(cache, sender, bl, mgr, proxyAddr, pacContent),
 	}
 
 	go func() {

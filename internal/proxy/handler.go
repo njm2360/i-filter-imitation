@@ -25,12 +25,14 @@ type Server struct {
 	rp          *httputil.ReverseProxy
 	blocklist   *Blocklist
 	scanHandler http.Handler
+	pacContent  []byte // nil means PAC distribution is disabled
 }
 
 // NewServer creates a Server. mgr may be nil to disable file scanning.
 // proxyAddr is the externally reachable address of this proxy (e.g. "http://192.168.1.1:8080"),
 // embedded in the scan-result HTML so the browser can fetch scan status directly.
-func NewServer(cc *cert.Cache, sender *logger.Sender, bl *Blocklist, mgr *scan.Manager, proxyAddr string) *Server {
+// pacContent may be nil to disable PAC file serving.
+func NewServer(cc *cert.Cache, sender *logger.Sender, bl *Blocklist, mgr *scan.Manager, proxyAddr string, pacContent []byte) *Server {
 	base := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,
@@ -57,7 +59,7 @@ func NewServer(cc *cert.Cache, sender *logger.Sender, bl *Blocklist, mgr *scan.M
 		},
 	}
 
-	return &Server{certCache: cc, sender: sender, tt: tt, rp: rp, blocklist: bl, scanHandler: scanHandler}
+	return &Server{certCache: cc, sender: sender, tt: tt, rp: rp, blocklist: bl, scanHandler: scanHandler, pacContent: pacContent}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +75,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Host == "" {
 		if strings.HasPrefix(r.URL.Path, scanPrefix) {
 			s.scanHandler.ServeHTTP(w, r)
+			return
+		}
+		if r.URL.Path == "/proxy.pac" && s.pacContent != nil {
+			w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
+			w.Write(s.pacContent)
 			return
 		}
 		http.NotFound(w, r)
