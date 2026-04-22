@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
 	"net"
@@ -62,8 +61,11 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	hsCtx, hsCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer hsCancel()
 	if err := tlsConn.HandshakeContext(hsCtx); err != nil {
-		slog.Warn("TLS handshake failed, falling back to raw tunnel", "host", host, "err", err)
-		s.rawTunnel(conn, host)
+		if strings.Contains(err.Error(), "remote error: tls:") {
+			slog.Warn("possible certificate pinning detected, connection blocked", "host", host, "client", conn.RemoteAddr(), "tls_error", err)
+		} else {
+			slog.Debug("TLS handshake failed", "host", host, "client", conn.RemoteAddr(), "err", err)
+		}
 		return
 	}
 	defer tlsConn.Close()
@@ -98,21 +100,6 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	innerSrv.Serve(l) //nolint:errcheck
 }
 
-// rawTunnel performs a blind bidirectional copy when TLS interception is not possible.
-func (s *Server) rawTunnel(clientConn net.Conn, host string) {
-	upstream, err := net.DialTimeout("tcp", host, 10*time.Second)
-	if err != nil {
-		slog.Warn("raw tunnel dial failed", "host", host, "err", err)
-		return
-	}
-	defer upstream.Close()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); io.Copy(upstream, clientConn) }()
-	go func() { defer wg.Done(); io.Copy(clientConn, upstream) }()
-	wg.Wait()
-}
 
 // connWithReader wraps net.Conn to drain buffered bytes from a bufio.Reader first.
 type connWithReader struct {
