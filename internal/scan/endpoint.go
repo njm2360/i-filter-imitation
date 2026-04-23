@@ -24,8 +24,9 @@ func NewHandler(m *Manager) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Allow fetch() from file:// (Origin: null) and any other origin.
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// Allow fetch() from file:// only (Origin: null).
+	// Wildcard would let any webpage on the LAN poll scan results.
+	w.Header().Set("Access-Control-Allow-Origin", "null")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 
 	if r.Method == http.MethodOptions {

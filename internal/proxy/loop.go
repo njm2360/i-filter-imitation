@@ -7,10 +7,18 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/njm2360/i-filter-imitation/internal/logger"
 )
+
+var bwPool = sync.Pool{
+	New: func() any {
+		return bufio.NewWriterSize(io.Discard, transportBufSize)
+	},
+}
 
 // hop-by-hop headers that must not be forwarded to the client.
 var hopHeaders = map[string]struct{}{
@@ -77,7 +85,7 @@ func (s *Server) serveConnLoop(conn net.Conn, scheme, host, tlsVer, tlsCiph stri
 				XForwardedFor: xff, Method: method, Scheme: scheme,
 				Host: host, Path: path, StatusCode: http.StatusBadGateway,
 				DurationMS: time.Since(start).Milliseconds(),
-				UserAgent: ua, TLSVersion: tlsVer, TLSCipher: tlsCiph,
+				UserAgent:  ua, TLSVersion: tlsVer, TLSCipher: tlsCiph,
 			})
 			return
 		}
@@ -100,26 +108,49 @@ func (s *Server) serveConnLoop(conn net.Conn, scheme, host, tlsVer, tlsCiph stri
 				Time: start, RequestID: reqID, ClientIP: clientIP,
 				XForwardedFor: xff, Method: method, Scheme: scheme,
 				Host: host, Path: path, StatusCode: status,
-				BytesSent: meta.bytesSent.Load(),
+				BytesSent:  meta.bytesSent.Load(),
 				DurationMS: time.Since(start).Milliseconds(),
-				UserAgent: ua, TLSVersion: tlsVer, TLSCipher: tlsCiph,
+				UserAgent:  ua, TLSVersion: tlsVer, TLSCipher: tlsCiph,
 			})
 			return
 		}
 
-		// Write status + headers, then stream body with a large buffer.
-		loopWriteHead(conn, resp)
-		loopWriteBody(conn, resp, cpBuf)
+		// SSE: bypass buffering so each event is delivered to the client
+		// immediately. Use Connection: close instead of chunked encoding so
+		// the raw body bytes can be copied straight to the TLS conn.
+		if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+			resp.Close = true
+			loopWriteHead(conn, resp)
+			io.CopyBuffer(conn, resp.Body, cpBuf) //nolint:errcheck
+			resp.Body.Close()
+			s.emitLog(logger.AccessRecord{
+				Time: start, RequestID: reqID, ClientIP: clientIP,
+				XForwardedFor: xff, Method: method, Scheme: scheme,
+				Host: host, Path: path, StatusCode: status,
+				BytesSent:  meta.bytesSent.Load(),
+				DurationMS: time.Since(start).Milliseconds(),
+				UserAgent:  ua, ContentType: meta.contentType,
+				TLSVersion: tlsVer, TLSCipher: tlsCiph,
+			})
+			return
+		}
+
+		bw := bwPool.Get().(*bufio.Writer)
+		bw.Reset(conn)
+		loopWriteHead(bw, resp)
+		loopWriteBody(bw, resp, cpBuf)
+		bw.Flush() //nolint:errcheck
+		bwPool.Put(bw)
 		resp.Body.Close()
 
 		s.emitLog(logger.AccessRecord{
 			Time: start, RequestID: reqID, ClientIP: clientIP,
 			XForwardedFor: xff, Method: method, Scheme: scheme,
 			Host: host, Path: path, StatusCode: status,
-			BytesSent:   meta.bytesSent.Load(),
-			DurationMS:  time.Since(start).Milliseconds(),
-			UserAgent:   ua, ContentType: meta.contentType,
-			TLSVersion:  tlsVer, TLSCipher: tlsCiph,
+			BytesSent:  meta.bytesSent.Load(),
+			DurationMS: time.Since(start).Milliseconds(),
+			UserAgent:  ua, ContentType: meta.contentType,
+			TLSVersion: tlsVer, TLSCipher: tlsCiph,
 		})
 
 		if resp.Close || req.Close {
@@ -163,34 +194,36 @@ func loopWriteHead(w io.Writer, resp *http.Response) {
 	}
 
 	// Transport removes Transfer-Encoding after decoding; re-add chunked
-	// when body length is unknown.
+	// when body length is unknown. For streaming responses (e.g. SSE) where
+	// resp.Close is set, use Connection: close instead so the raw body bytes
+	// can be forwarded directly without chunked framing.
 	if resp.ContentLength < 0 && resp.StatusCode != http.StatusSwitchingProtocols {
-		fmt.Fprint(w, "Transfer-Encoding: chunked\r\n")
+		if resp.Close {
+			fmt.Fprint(w, "Connection: close\r\n")
+		} else {
+			fmt.Fprint(w, "Transfer-Encoding: chunked\r\n")
+		}
 	}
 
 	fmt.Fprint(w, "\r\n")
 }
 
-// loopWriteBody streams the response body to w with a large copy buffer.
-// For responses with unknown Content-Length it applies chunked encoding
-// using the same buf so the chunk headers and payload are accumulated in a
-// 256 KB bufio.Writer before hitting TLS, avoiding small TLS records.
+// loopWriteBody streams the response body into w (a pooled bufio.Writer from
+// the caller). Reads from resp.Body are coalesced in the buffer before being
+// flushed as large TLS writes; the caller is responsible for the final Flush.
 func loopWriteBody(w io.Writer, resp *http.Response, buf []byte) {
 	if resp.ContentLength == 0 {
 		return
 	}
 	if resp.ContentLength > 0 {
-		// Known length: straight copy, one large write per buffer fill.
 		io.CopyBuffer(w, resp.Body, buf) //nolint:errcheck
 		return
 	}
-	// Unknown length: wrap w in a large bufio.Writer so chunk headers and
-	// payload are coalesced into a single TLS write per buffer flush.
-	bw := bufio.NewWriterSize(w, len(buf))
-	cw := &loopChunkedWriter{w: bw}
+	// Unknown length: chunked encoding; w is already buffered so chunk
+	// headers and payload are coalesced before hitting TLS.
+	cw := &loopChunkedWriter{w: w}
 	io.CopyBuffer(cw, resp.Body, buf) //nolint:errcheck
 	cw.close()
-	bw.Flush() //nolint:errcheck
 }
 
 // loopForbidden writes a 403 blocked-page response and closes.
@@ -207,16 +240,48 @@ func loopPlainStatus(w io.Writer, code int) {
 		code, http.StatusText(code))
 }
 
+const bridgeIdleTimeout = 5 * time.Minute
+
 // loopBridge does bidirectional copy between conn and rwc until either closes.
+// An idle timeout is enforced: if no data flows for bridgeIdleTimeout, conn is
+// closed which unblocks both directions and prevents goroutine leaks.
 func loopBridge(conn net.Conn, rwc io.ReadWriteCloser) {
+	refresh := func() { conn.SetDeadline(time.Now().Add(bridgeIdleTimeout)) } //nolint:errcheck
+	refresh()
+	bc := &bridgeConn{Conn: conn, refresh: refresh}
+
 	done := make(chan struct{})
 	go func() {
-		io.Copy(rwc, conn) //nolint:errcheck
+		io.Copy(rwc, bc) //nolint:errcheck
 		rwc.Close()
 		close(done)
 	}()
-	io.Copy(conn, rwc) //nolint:errcheck
+	io.Copy(bc, rwc) //nolint:errcheck
+	conn.Close()     // unblock goroutine if upstream closed first
 	<-done
+}
+
+// bridgeConn wraps net.Conn and resets the read/write deadline on every
+// successful data transfer, implementing an activity-based idle timeout.
+type bridgeConn struct {
+	net.Conn
+	refresh func()
+}
+
+func (b *bridgeConn) Read(p []byte) (int, error) {
+	n, err := b.Conn.Read(p)
+	if n > 0 {
+		b.refresh()
+	}
+	return n, err
+}
+
+func (b *bridgeConn) Write(p []byte) (int, error) {
+	n, err := b.Conn.Write(p)
+	if n > 0 {
+		b.refresh()
+	}
+	return n, err
 }
 
 // drainBody discards and closes body to allow connection reuse.

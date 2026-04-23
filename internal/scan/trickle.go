@@ -91,9 +91,8 @@ func (b *TrickleBody) readOne(p []byte) (int, error) {
 				}
 				return 0, io.EOF
 			}
-		default:
+		case <-b.job.newBytes:
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -121,8 +120,7 @@ func (b *TrickleBody) flushRead(p []byte) (int, error) {
 				}
 				return 0, io.EOF
 			}
-		default:
-			time.Sleep(5 * time.Millisecond)
+		case <-b.job.newBytes:
 		}
 	}
 }

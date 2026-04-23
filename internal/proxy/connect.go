@@ -2,26 +2,23 @@ package proxy
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/tls"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // context keys for TLS metadata propagated into serveConnLoop
 type tlsVersionKey struct{}
 type tlsCipherKey struct{}
 
-// newRequestID generates a random 16-byte hex request ID.
 func newRequestID() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	return uuid.New().String()
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {

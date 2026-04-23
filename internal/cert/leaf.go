@@ -14,16 +14,29 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-const redisKeyPrefix = "leafcert:"
+const (
+	redisKeyPrefix          = "leafcert:"
+	memCacheMax             = 2000
+	memCacheCleanupInterval = 10 * time.Minute
+)
+
+type memEntry struct {
+	cert      *tls.Certificate
+	expiresAt time.Time
+}
 
 type Cache struct {
-	ca    *CA
-	redis *redis.Client
+	ca       *CA
+	redis    *redis.Client
+	memCache sync.Map     // domain → *memEntry
+	memCount atomic.Int64
 }
 
 type cachedCert struct {
@@ -32,8 +45,45 @@ type cachedCert struct {
 	NotAfterUnix int64  `json:"not_after_unix"`
 }
 
-func NewCache(ca *CA, rdb *redis.Client) *Cache {
-	return &Cache{ca: ca, redis: rdb}
+func NewCache(ctx context.Context, ca *CA, rdb *redis.Client) *Cache {
+	c := &Cache{ca: ca, redis: rdb}
+	go c.runCleanup(ctx)
+	return c
+}
+
+func (c *Cache) runCleanup(ctx context.Context) {
+	ticker := time.NewTicker(memCacheCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.evictExpired()
+		}
+	}
+}
+
+func (c *Cache) evictExpired() {
+	now := time.Now()
+	c.memCache.Range(func(k, v any) bool {
+		if v.(*memEntry).expiresAt.Before(now) {
+			c.memCache.Delete(k)
+			c.memCount.Add(-1)
+		}
+		return true
+	})
+}
+
+func (c *Cache) storeMem(domain string, cert *tls.Certificate, notAfter time.Time) {
+	if c.memCount.Load() >= memCacheMax {
+		return
+	}
+	c.memCache.Store(domain, &memEntry{
+		cert:      cert,
+		expiresAt: notAfter,
+	})
+	c.memCount.Add(1)
 }
 
 func (c *Cache) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -41,30 +91,48 @@ func (c *Cache) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	if domain == "" {
 		domain = "localhost"
 	}
-	ctx := hello.Context()
 
+	// 1. In-process cache: skip Redis and PEM parsing on cache hit.
+	if v, ok := c.memCache.Load(domain); ok {
+		e := v.(*memEntry)
+		if time.Now().Add(24 * time.Hour).Before(e.expiresAt) {
+			return e.cert, nil
+		}
+		c.memCache.Delete(domain)
+		c.memCount.Add(-1)
+	}
+
+	ctx := hello.Context()
 	key := redisKeyPrefix + domain
 
+	// 2. Redis cache.
 	data, err := c.redis.Get(ctx, key).Bytes()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		slog.Warn("redis get cert", "domain", domain, "err", err)
 	}
 	if err == nil {
-		cert, err := decodeCachedCert(data)
+		cc, err := decodeCachedCert(data)
 		if err != nil {
 			slog.Warn("decode cached cert", "domain", domain, "err", err)
-		} else if time.Now().Add(24 * time.Hour).Before(time.Unix(cert.NotAfterUnix, 0)) {
-			return cert.toTLS()
+		} else if time.Now().Add(24 * time.Hour).Before(time.Unix(cc.NotAfterUnix, 0)) {
+			cert, err := cc.toTLS()
+			if err != nil {
+				return nil, err
+			}
+			c.storeMem(domain, cert, time.Unix(cc.NotAfterUnix, 0))
+			return cert, nil
 		}
 		c.redis.Del(ctx, key)
 	}
 
+	// 3. Generate new certificate.
 	generated, err := c.generate(domain)
 	if err != nil {
 		return nil, err
 	}
 
 	c.saveToRedis(ctx, key, generated)
+	c.storeMem(domain, &generated.cert, generated.notAfter)
 
 	return &generated.cert, nil
 }

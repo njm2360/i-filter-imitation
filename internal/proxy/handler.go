@@ -51,9 +51,10 @@ func NewServer(cc *cert.Cache, sender *logger.Sender, bl *Blocklist, mgr *scan.M
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		TLSHandshakeTimeout: 10 * time.Second,
-		ReadBufferSize:      transportBufSize,
-		WriteBufferSize:     transportBufSize,
+		TLSHandshakeTimeout:   10 * time.Second,
+		MaxIdleConnsPerHost:   128,
+		ReadBufferSize:        transportBufSize,
+		WriteBufferSize:       transportBufSize,
 		// Disable transparent gzip decompression: a MITM proxy must not alter
 		// content negotiation between client and server. Without this, Transport
 		// strips Content-Length (sizes differ after decompress), forcing the inner

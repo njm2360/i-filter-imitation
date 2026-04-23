@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -37,6 +38,7 @@ type Job struct {
 	CreatedAt       time.Time
 
 	written    atomic.Int64    // bytes flushed to TempPath so far
+	newBytes   chan struct{}   // non-blocking token: new bytes landed in TempPath
 	uploadDone chan struct{}   // closed when upstream body is fully written
 	resultCh   chan ScanResult // buffered(1); receives exactly one result
 	tailBody   io.ReadCloser   // CLI path: remaining body after MaxSize truncation
@@ -142,7 +144,7 @@ func (m *Manager) runScan(job *Job, body io.ReadCloser, saveTail bool) {
 	job.setResult(StatusScanning, "")
 
 	// countWriter wraps the file and tracks bytes written for the trickleBody.
-	cw := &countWriter{w: f, counter: &job.written}
+	cw := &countWriter{w: f, counter: &job.written, notify: job.newBytes}
 
 	// Limit so we never buffer more than MaxSize bytes.
 	limited := io.LimitReader(body, m.MaxSize+1)
@@ -212,19 +214,25 @@ func (m *Manager) ServeFile(job *Job, w http.ResponseWriter, r *http.Request) bo
 }
 
 // StartCleanup launches a background goroutine that removes expired jobs.
-func (m *Manager) StartCleanup() {
+// The goroutine exits when ctx is cancelled.
+func (m *Manager) StartCleanup(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(15 * time.Minute)
 		defer ticker.Stop()
-		for range ticker.C {
-			m.jobs.Range(func(k, v any) bool {
-				job := v.(*Job)
-				if time.Since(job.CreatedAt) > m.ttl {
-					os.Remove(job.TempPath)
-					m.jobs.Delete(k)
-				}
-				return true
-			})
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m.jobs.Range(func(k, v any) bool {
+					job := v.(*Job)
+					if time.Since(job.CreatedAt) > m.ttl {
+						os.Remove(job.TempPath) //nolint:errcheck
+						m.jobs.Delete(k)
+					}
+					return true
+				})
+			}
 		}
 	}()
 }
@@ -250,6 +258,7 @@ func (m *Manager) newJob(req *http.Request, resp *http.Response) *Job {
 		OriginalURL:     req.URL.String(),
 		TempPath:        tempPath,
 		CreatedAt:       time.Now(),
+		newBytes:        make(chan struct{}, 1),
 		uploadDone:      make(chan struct{}),
 		resultCh:        make(chan ScanResult, 1),
 	}
@@ -261,11 +270,16 @@ func (m *Manager) newJob(req *http.Request, resp *http.Response) *Job {
 type countWriter struct {
 	w       io.Writer
 	counter *atomic.Int64
+	notify  chan<- struct{} // non-blocking signal to waiting readers
 }
 
 func (cw *countWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
 	cw.counter.Add(int64(n))
+	select {
+	case cw.notify <- struct{}{}:
+	default:
+	}
 	return n, err
 }
 

@@ -20,6 +20,9 @@ import (
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	listenAddr := envOr("LISTEN_ADDR", ":8080")
 	proxyAddr := envOr("PROXY_ADDR", deriveProxyAddr(listenAddr))
 	caCertPath := envOr("CA_CERT", "ca.crt")
@@ -65,7 +68,7 @@ func main() {
 		}
 		clamd := scan.NewClamdClient(network, address, 30*time.Second)
 		mgr = scan.NewManager(tempDir, time.Duration(ttlMin)*time.Minute, maxMB<<20, clamd)
-		mgr.StartCleanup()
+		mgr.StartCleanup(ctx)
 		slog.Info("scan enabled", "clamd", clamdAddr, "max_mb", maxMB, "proxy_addr", proxyAddr)
 	}
 
@@ -79,7 +82,7 @@ func main() {
 		slog.Info("PAC file loaded", "path", pacFilePath)
 	}
 
-	cache := cert.NewCache(ca, rdb)
+	cache := cert.NewCache(ctx, ca, rdb)
 	var sender *logger.Sender
 	if syslogAddr != "" {
 		sender = logger.NewSender(syslogNet, syslogAddr, 1000)
@@ -100,14 +103,13 @@ func main() {
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	<-ctx.Done()
+	stop() // release signal resources
 
 	slog.Info("shutting down")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	srv.Shutdown(ctx)
+	srv.Shutdown(shutCtx) //nolint:errcheck
 }
 
 func envOr(key, def string) string {
