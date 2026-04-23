@@ -68,6 +68,8 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	case StatusInfected:
 		resp.Status = "infected"
 		resp.Threat = job.ThreatName()
+	case StatusTooLarge:
+		resp.Status = "toobig"
 	default:
 		resp.Status = "error"
 	}
@@ -164,6 +166,13 @@ const scanPageTemplate = `<!DOCTYPE html>
           document.getElementById('msg').innerHTML =
             'スキャンをスキップしました。<br>' +
             '<a class="btn" href="' + downloadURL + '" download="' + filename + '">ダウンロード</a>';
+        } else if (data.status === 'toobig') {
+          document.getElementById('spinner').style.display = 'none';
+          document.getElementById('card').insertAdjacentHTML(
+            'afterbegin', '<div class="icon">⚠️</div>');
+          document.getElementById('title').textContent = 'ファイルが大きすぎます';
+          document.getElementById('msg').textContent =
+            'ファイルが大きすぎてスキャンできません。';
         } else {
           setTimeout(poll, 2000);
         }

@@ -55,13 +55,19 @@ func (b *TrickleBody) Read(p []byte) (int, error) {
 }
 
 func (b *TrickleBody) Close() error {
+	var err error
 	if b.file != nil {
-		return b.file.Close()
+		err = b.file.Close()
+	}
+	if b.job != nil {
+		if tail := b.job.tailBody; tail != nil {
+			tail.Close() //nolint:errcheck
+		}
 	}
 	if b.fallback != nil {
-		return b.fallback.Close()
+		err = b.fallback.Close()
 	}
-	return nil
+	return err
 }
 
 // readOne reads exactly one byte from the temp file, spinning until data is available.
@@ -80,6 +86,9 @@ func (b *TrickleBody) readOne(p []byte) (int, error) {
 		select {
 		case <-b.job.uploadDone:
 			if b.readPos >= b.job.written.Load() {
+				if tail := b.job.tailBody; tail != nil {
+					return tail.Read(p[:1])
+				}
 				return 0, io.EOF
 			}
 		default:
@@ -107,6 +116,9 @@ func (b *TrickleBody) flushRead(p []byte) (int, error) {
 		select {
 		case <-b.job.uploadDone:
 			if b.readPos >= b.job.written.Load() {
+				if tail := b.job.tailBody; tail != nil {
+					return tail.Read(p)
+				}
 				return 0, io.EOF
 			}
 		default:

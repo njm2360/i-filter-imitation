@@ -23,20 +23,23 @@ const (
 	StatusClean               // scan complete, no threat
 	StatusInfected            // scan complete, threat found
 	StatusError               // clamd unavailable; file buffered, pass-through allowed
+	StatusTooLarge            // file exceeded MaxSize mid-scan; incomplete temp file
 )
 
 // Job represents a single in-flight or completed scan.
 type Job struct {
-	ID          string
-	Filename    string
-	ContentType string
-	OriginalURL string
-	TempPath    string
-	CreatedAt   time.Time
+	ID              string
+	Filename        string
+	ContentType     string
+	ContentEncoding string // e.g. "gzip", "br"; re-applied by ServeFile
+	OriginalURL     string
+	TempPath        string
+	CreatedAt       time.Time
 
 	written    atomic.Int64    // bytes flushed to TempPath so far
 	uploadDone chan struct{}   // closed when upstream body is fully written
 	resultCh   chan ScanResult // buffered(1); receives exactly one result
+	tailBody   io.ReadCloser   // CLI path: remaining body after MaxSize truncation
 
 	mu         sync.RWMutex
 	status     ScanStatus
@@ -91,7 +94,7 @@ func (m *Manager) GetJob(id string) (*Job, bool) {
 // background. The returned *Job can be polled for status via GetJob.
 func (m *Manager) StartBrowserJob(req *http.Request, resp *http.Response) *Job {
 	job := m.newJob(req, resp)
-	go m.runScan(job, resp.Body)
+	go m.runScan(job, resp.Body, false)
 	return job
 }
 
@@ -102,12 +105,12 @@ func (m *Manager) StartCLIJob(req *http.Request, resp *http.Response) (*Job, *Tr
 
 	f, err := os.Open(job.TempPath)
 	if err != nil {
-		// Temp file unavailable: fall back to raw pass-through.
-		go m.runScan(job, resp.Body)
+		// Temp file unavailable: skip scan and pass body through directly (Bug 2 fix).
+		job.setResult(StatusError, "")
 		return job, &TrickleBody{fallback: resp.Body}
 	}
 
-	go m.runScan(job, resp.Body)
+	go m.runScan(job, resp.Body, true)
 	return job, &TrickleBody{
 		job:      job,
 		file:     f,
@@ -117,8 +120,15 @@ func (m *Manager) StartCLIJob(req *http.Request, resp *http.Response) (*Job, *Tr
 
 // runScan reads the upstream body into the temp file while streaming to clamd
 // in parallel via io.TeeReader. Updates job status when complete.
-func (m *Manager) runScan(job *Job, body io.ReadCloser) {
-	defer body.Close()
+// saveTail controls whether a body that exceeds MaxSize is handed to the CLI
+// TrickleBody (true) or discarded (false, browser path).
+func (m *Manager) runScan(job *Job, body io.ReadCloser, saveTail bool) {
+	bodyOwned := true
+	defer func() {
+		if bodyOwned {
+			body.Close()
+		}
+	}()
 	defer close(job.uploadDone)
 
 	f, err := os.OpenFile(job.TempPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -142,10 +152,17 @@ func (m *Manager) runScan(job *Job, body io.ReadCloser) {
 
 	result, err := m.clamd.ScanReader(tee)
 
-	// If the stream was truncated (body had more than MaxSize bytes), drain the rest.
+	// If the stream was truncated (body had more than MaxSize bytes), handle remainder.
 	if cw.counter.Load() > m.MaxSize {
-		io.Copy(io.Discard, body) //nolint:errcheck
-		job.setResult(StatusError, "")
+		if saveTail {
+			// CLI path: transfer body ownership to TrickleBody so it can chain the
+			// remaining bytes after the temp file content for complete delivery.
+			bodyOwned = false
+			job.tailBody = body
+		} else {
+			io.Copy(io.Discard, body) //nolint:errcheck
+		}
+		job.setResult(StatusTooLarge, "")
 		job.resultCh <- ScanResult{Clean: true}
 		return
 	}
@@ -187,6 +204,9 @@ func (m *Manager) ServeFile(job *Job, w http.ResponseWriter, r *http.Request) bo
 	}
 	w.Header().Set("Content-Disposition", `attachment; filename="`+job.Filename+`"`)
 	w.Header().Set("Content-Type", job.ContentType)
+	if job.ContentEncoding != "" {
+		w.Header().Set("Content-Encoding", job.ContentEncoding)
+	}
 	http.ServeContent(w, r, job.Filename, info.ModTime(), f)
 	return true
 }
@@ -223,14 +243,15 @@ func (m *Manager) newJob(req *http.Request, resp *http.Response) *Job {
 		f.Close()
 	}
 	job := &Job{
-		ID:          id,
-		Filename:    filename,
-		ContentType: ct,
-		OriginalURL: req.URL.String(),
-		TempPath:    tempPath,
-		CreatedAt:   time.Now(),
-		uploadDone:  make(chan struct{}),
-		resultCh:    make(chan ScanResult, 1),
+		ID:              id,
+		Filename:        filename,
+		ContentType:     ct,
+		ContentEncoding: resp.Header.Get("Content-Encoding"),
+		OriginalURL:     req.URL.String(),
+		TempPath:        tempPath,
+		CreatedAt:       time.Now(),
+		uploadDone:      make(chan struct{}),
+		resultCh:        make(chan ScanResult, 1),
 	}
 	m.jobs.Store(id, job)
 	return job
@@ -253,4 +274,3 @@ func newID() string {
 	rand.Read(b) //nolint:errcheck
 	return hex.EncodeToString(b)
 }
-
