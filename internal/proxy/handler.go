@@ -111,6 +111,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Write(s.pacContent) //nolint:errcheck
 			return
 		}
+		// Serve the MITM CA directly so operators can fetch it without going
+		// through the proxy itself (e.g. http://<proxy-host>:<port>/cert.crt).
+		switch r.URL.Path {
+		case "/cert.pem":
+			s.serveCertPEM(w)
+			return
+		case "/cert.crt":
+			s.serveCertDER(w)
+			return
+		}
 		http.NotFound(w, r)
 		return
 	}
