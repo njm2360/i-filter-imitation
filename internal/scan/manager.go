@@ -70,18 +70,24 @@ func (j *Job) setResult(s ScanStatus, threat string) {
 	j.mu.Unlock()
 }
 
+// Scanner is the interface for virus scanning backends.
+// ClamdClient implements this interface; test code can substitute a stub.
+type Scanner interface {
+	ScanReader(r io.Reader) (ScanResult, error)
+}
+
 // Manager owns all active scan jobs and their temp files.
 type Manager struct {
 	dir     string
 	ttl     time.Duration
 	MaxSize int64
-	clamd   *ClamdClient
-	jobs    sync.Map // map[string]*Job
+	clamd   Scanner
+	jobs    sync.Map     // map[string]*Job
 	cache   *ResultCache // nil = caching disabled
 }
 
 // NewManager creates a Manager. dir is the temp file directory. cache may be nil.
-func NewManager(dir string, ttl time.Duration, maxSize int64, clamd *ClamdClient, cache *ResultCache) *Manager {
+func NewManager(dir string, ttl time.Duration, maxSize int64, clamd Scanner, cache *ResultCache) *Manager {
 	return &Manager{dir: dir, ttl: ttl, MaxSize: maxSize, clamd: clamd, cache: cache}
 }
 

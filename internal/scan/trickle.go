@@ -28,6 +28,8 @@ const (
 
 var errVirusDetected = errors.New("connection closed: virus detected")
 
+var trickleInterval = 1 * time.Second
+
 func (b *TrickleBody) Read(p []byte) (int, error) {
 	if b.fallback != nil {
 		return b.fallback.Read(p)
@@ -38,7 +40,7 @@ func (b *TrickleBody) Read(p []byte) (int, error) {
 	case modeFlushing:
 		return b.flushRead(p)
 	default: // modeTrickling
-		timer := time.NewTimer(time.Second)
+		timer := time.NewTimer(trickleInterval)
 		select {
 		case res := <-b.resultCh:
 			timer.Stop()
@@ -86,10 +88,16 @@ func (b *TrickleBody) readOne(p []byte) (int, error) {
 		select {
 		case <-b.job.uploadDone:
 			if b.readPos >= b.job.written.Load() {
-				if tail := b.job.tailBody; tail != nil {
-					return tail.Read(p[:1])
+				// All bytes consumed. resultCh is guaranteed to be filled before
+				// uploadDone closes (same goroutine, send happens before return).
+				// Block until the verdict arrives, then act on it.
+				res := <-b.resultCh
+				if !res.Clean {
+					b.mode = modeAborted
+					return 0, errVirusDetected
 				}
-				return 0, io.EOF
+				b.mode = modeFlushing
+				return b.flushRead(p) // handles tailBody and final EOF naturally
 			}
 		case <-b.job.newBytes:
 		}
