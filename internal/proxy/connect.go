@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -44,7 +45,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Wrap conn so already-buffered bytes from the outer server are drained first.
-	wrapped := &connWithReader{conn: conn, r: bufrw.Reader}
+	wrapped := &connWithReader{conn: conn, br: bufrw.Reader}
 
 	// TLS MITM handshake with the client.
 	tlsConn := tls.Server(wrapped, s.certCache.TLSConfig())
@@ -68,13 +69,21 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	s.serveConnLoop(tlsConn, "https", host, tlsVersionStr(state.Version), tlsCipherStr(state.CipherSuite))
 }
 
-// connWithReader wraps net.Conn to drain buffered bytes from a bufio.Reader first.
+// connWithReader wraps net.Conn to drain buffered bytes from a bufio.Reader first
 type connWithReader struct {
 	conn net.Conn
-	r    interface{ Read([]byte) (int, error) }
+	br   *bufio.Reader
 }
 
-func (c *connWithReader) Read(b []byte) (int, error)         { return c.r.Read(b) }
+func (c *connWithReader) Read(b []byte) (int, error) {
+	if c.br != nil {
+		if c.br.Buffered() > 0 {
+			return c.br.Read(b)
+		}
+		c.br = nil
+	}
+	return c.conn.Read(b)
+}
 func (c *connWithReader) Write(b []byte) (int, error)        { return c.conn.Write(b) }
 func (c *connWithReader) Close() error                       { return c.conn.Close() }
 func (c *connWithReader) LocalAddr() net.Addr                { return c.conn.LocalAddr() }

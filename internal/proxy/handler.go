@@ -54,6 +54,7 @@ func NewServer(cc *cert.Cache, sender *logger.Sender, bl *Blocklist, mgr *scan.M
 		ReadBufferSize:      transportBufSize,
 		WriteBufferSize:     transportBufSize,
 		DisableCompression:  true,
+		ForceAttemptHTTP2:   true,
 	}
 	tt := &timedTransport{base: base}
 

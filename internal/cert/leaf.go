@@ -35,7 +35,7 @@ type memEntry struct {
 type Cache struct {
 	ca       *CA
 	redis    *redis.Client
-	memCache sync.Map     // domain → *memEntry
+	memCache sync.Map // domain → *memEntry
 	memCount atomic.Int64
 }
 
@@ -187,6 +187,7 @@ func (c *Cache) TLSConfig() *tls.Config {
 			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
 			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
 		},
+		DynamicRecordSizingDisabled: true,
 	}
 }
 

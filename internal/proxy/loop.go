@@ -252,12 +252,14 @@ func loopBridge(conn net.Conn, rwc io.ReadWriteCloser) {
 
 	done := make(chan struct{})
 	go func() {
-		io.Copy(rwc, bc) //nolint:errcheck
+		buf := make([]byte, transportBufSize)
+		io.CopyBuffer(rwc, bc, buf)
 		rwc.Close()
 		close(done)
 	}()
-	io.Copy(bc, rwc) //nolint:errcheck
-	conn.Close()     // unblock goroutine if upstream closed first
+	buf := make([]byte, transportBufSize)
+	io.CopyBuffer(bc, rwc, buf)
+	conn.Close()
 	<-done
 }
 
