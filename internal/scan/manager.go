@@ -100,6 +100,45 @@ func (m *Manager) GetJob(id string) (*Job, bool) {
 	return v.(*Job), true
 }
 
+// LookupURL returns a cached verdict for the given URL, if any. Used by the
+// scan transport to short-circuit before creating a new job and re-fetching
+// the body when we already know the answer.
+func (m *Manager) LookupURL(ctx context.Context, rawURL string) (ScanStatus, string, bool) {
+	if m.cache == nil {
+		return 0, "", false
+	}
+	return m.cache.GetByURL(ctx, rawURL)
+}
+
+// NewPresetJob registers a job whose verdict is already known (from the URL
+// cache). It has no temp file and no scan goroutine; the scan page's first
+// status poll returns the preset verdict immediately. Intended only for
+// infected cached URLs — clean ones should bypass the scan page entirely.
+func (m *Manager) NewPresetJob(req *http.Request, resp *http.Response, status ScanStatus, threat string) *Job {
+	id := newID()
+	filename := filenameFrom(req, resp)
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	job := &Job{
+		ID:              id,
+		Filename:        filename,
+		ContentType:     ct,
+		ContentEncoding: resp.Header.Get("Content-Encoding"),
+		OriginalURL:     req.URL.String(),
+		CreatedAt:       time.Now(),
+		newBytes:        make(chan struct{}, 1),
+		uploadDone:      make(chan struct{}),
+		resultCh:        make(chan ScanResult, 1),
+		status:          status,
+		threatName:      threat,
+	}
+	close(job.uploadDone)
+	m.jobs.Store(id, job)
+	return job
+}
+
 // StartBrowserJob buffers the upstream response body and scans it in the
 // background. The returned *Job can be polled for status via GetJob.
 func (m *Manager) StartBrowserJob(req *http.Request, resp *http.Response) *Job {

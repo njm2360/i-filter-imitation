@@ -35,27 +35,53 @@ func (t *scanTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 
+	// URL cache fast-path. A cached verdict means we've already scanned this
+	// exact URL recently, so there's no reason to spin up a new job, redirect
+	// through the scan page, or re-buffer the body just to hit the same result.
+	//   - Clean:    stream the upstream response straight through.
+	//   - Infected: register a preset-infected Job and redirect to the scan
+	//               page; the first status poll returns the cached threat
+	//               name so the UX is identical to a fresh infected scan.
+	if status, threat, ok := t.manager.LookupURL(req.Context(), req.URL.String()); ok {
+		switch status {
+		case scan.StatusClean:
+			return resp, nil
+		case scan.StatusInfected:
+			resp.Body.Close()
+			job := t.manager.NewPresetJob(req, resp, scan.StatusInfected, threat)
+			return scanRedirectResponse(job.ID), nil
+		}
+	}
+
 	if isBrowserRequest(req) {
 		return t.handleBrowser(req, resp)
 	}
 	return t.handleCLI(req, resp)
 }
 
-// handleBrowser starts a background scan and redirects the browser to the
-// scan result page hosted on the magic host (scan.invalid). The page polls
-// the proxy via same-origin relative URLs — no CORS or file:// workarounds needed.
-func (t *scanTransport) handleBrowser(req *http.Request, resp *http.Response) (*http.Response, error) {
-	job := t.manager.StartBrowserJob(req, resp)
-	location := "http://" + magicHost + scan.PathResult + "?id=" + job.ID
+// scanRedirectResponse builds a 302 redirect to the scan result page for the
+// given job ID. Shared between the normal browser scan flow and the URL-cache
+// infected fast-path so both hit the same UI.
+func scanRedirectResponse(jobID string) *http.Response {
+	location := "http://" + magicHost + scan.PathResult + "?id=" + jobID
 	synth := &http.Response{
 		StatusCode:    http.StatusFound,
-		ProtoMajor:    resp.ProtoMajor,
-		ProtoMinor:    resp.ProtoMinor,
+		ProtoMajor:    1,
+		ProtoMinor:    1,
 		Header:        make(http.Header),
 		Body:          http.NoBody,
 		ContentLength: 0,
 	}
 	synth.Header.Set("Location", location)
+	return synth
+}
+
+// handleBrowser starts a background scan and redirects the browser to the
+// scan result page hosted on the magic host. The page polls the proxy via
+// same-origin relative URLs — no CORS or file:// workarounds needed.
+func (t *scanTransport) handleBrowser(req *http.Request, resp *http.Response) (*http.Response, error) {
+	job := t.manager.StartBrowserJob(req, resp)
+	synth := scanRedirectResponse(job.ID)
 	synth.Header.Set("X-Proxy-Scan", "pending:"+job.ID)
 	return synth, nil
 }
