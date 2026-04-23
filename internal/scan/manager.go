@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -76,11 +77,12 @@ type Manager struct {
 	MaxSize int64
 	clamd   *ClamdClient
 	jobs    sync.Map // map[string]*Job
+	cache   *ResultCache // nil = caching disabled
 }
 
-// NewManager creates a Manager. dir is the temp file directory.
-func NewManager(dir string, ttl time.Duration, maxSize int64, clamd *ClamdClient) *Manager {
-	return &Manager{dir: dir, ttl: ttl, MaxSize: maxSize, clamd: clamd}
+// NewManager creates a Manager. dir is the temp file directory. cache may be nil.
+func NewManager(dir string, ttl time.Duration, maxSize int64, clamd *ClamdClient, cache *ResultCache) *Manager {
+	return &Manager{dir: dir, ttl: ttl, MaxSize: maxSize, clamd: clamd, cache: cache}
 }
 
 // GetJob retrieves a job by ID.
@@ -146,11 +148,53 @@ func (m *Manager) runScan(job *Job, body io.ReadCloser, saveTail bool) {
 	// countWriter wraps the file and tracks bytes written for the trickleBody.
 	cw := &countWriter{w: f, counter: &job.written, notify: job.newBytes}
 
+	// hw computes SHA-256 of the file content as bytes flow through.
+	hw := sha256.New()
+
+	// Writes go to both the temp file (cw) and the hash accumulator (hw).
+	fileAndHash := io.MultiWriter(cw, hw)
+
 	// Limit so we never buffer more than MaxSize bytes.
 	limited := io.LimitReader(body, m.MaxSize+1)
 
-	// TeeReader: as ScanReader consumes the stream it also writes to cw (→ file).
-	tee := io.TeeReader(limited, cw)
+	ctx := context.Background()
+
+	// --- URL cache fast path: skip clamd, buffer to disk only ---
+	if m.cache != nil {
+		if urlStatus, urlThreat, ok := m.cache.GetByURL(ctx, job.OriginalURL); ok {
+			tee := io.TeeReader(limited, fileAndHash)
+			io.Copy(io.Discard, tee) //nolint:errcheck
+
+			if cw.counter.Load() > m.MaxSize {
+				if saveTail {
+					bodyOwned = false
+					job.tailBody = body
+				} else {
+					io.Copy(io.Discard, body) //nolint:errcheck
+				}
+				job.setResult(StatusTooLarge, "")
+				job.resultCh <- ScanResult{Clean: true}
+				return
+			}
+
+			finalStatus, finalThreat := urlStatus, urlThreat
+			if hashStatus, hashThreat, hashOK := m.cache.GetByHash(ctx, hw.Sum(nil)); hashOK {
+				finalStatus, finalThreat = mergeResults(urlStatus, urlThreat, hashStatus, hashThreat)
+			}
+
+			if finalStatus == StatusClean {
+				job.setResult(StatusClean, "")
+			} else {
+				job.setResult(StatusInfected, finalThreat)
+			}
+			job.resultCh <- ScanResult{Clean: finalStatus == StatusClean, ThreatName: finalThreat}
+			return
+		}
+	}
+
+	// --- Normal scan path (URL cache miss or cache disabled) ---
+	// TeeReader: as ScanReader consumes the stream it also writes to fileAndHash.
+	tee := io.TeeReader(limited, fileAndHash)
 
 	result, err := m.clamd.ScanReader(tee)
 
@@ -180,12 +224,28 @@ func (m *Manager) runScan(job *Job, body io.ReadCloser, saveTail bool) {
 		return
 	}
 
-	if result.Clean {
+	// hw.Sum(nil) is complete: clamd.ScanReader drove the TeeReader to EOF.
+	contentHash := hw.Sum(nil)
+
+	clamdStatus := StatusClean
+	if !result.Clean {
+		clamdStatus = StatusInfected
+	}
+	finalStatus, finalThreat := clamdStatus, result.ThreatName
+
+	if m.cache != nil {
+		if hashStatus, hashThreat, ok := m.cache.GetByHash(ctx, contentHash); ok {
+			finalStatus, finalThreat = mergeResults(clamdStatus, result.ThreatName, hashStatus, hashThreat)
+		}
+		m.cache.Store(ctx, job.OriginalURL, contentHash, finalStatus, finalThreat)
+	}
+
+	if finalStatus == StatusClean {
 		job.setResult(StatusClean, "")
 	} else {
-		job.setResult(StatusInfected, result.ThreatName)
+		job.setResult(StatusInfected, finalThreat)
 	}
-	job.resultCh <- result
+	job.resultCh <- ScanResult{Clean: finalStatus == StatusClean, ThreatName: finalThreat}
 }
 
 // ServeFile serves the buffered temp file to the client.

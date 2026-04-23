@@ -65,8 +65,19 @@ func main() {
 			slog.Error("failed to create scan temp dir", "err", err)
 			os.Exit(1)
 		}
+		urlTTLMin, _ := strconv.ParseInt(envOr("SCAN_CACHE_URL_TTL_MINUTES", "60"), 10, 64)
+		hashTTLHrs, _ := strconv.ParseInt(envOr("SCAN_CACHE_HASH_TTL_HOURS", "24"), 10, 64)
+		maxEntries, _ := strconv.ParseInt(envOr("SCAN_CACHE_MAX_ENTRIES", "10000"), 10, 64)
+		resultCache := scan.NewResultCache(
+			time.Duration(urlTTLMin)*time.Minute,
+			time.Duration(hashTTLHrs)*time.Hour,
+			maxEntries,
+			rdb,
+		)
+		resultCache.StartCleanup(ctx)
+
 		clamd := scan.NewClamdClient(network, address, 30*time.Second)
-		mgr = scan.NewManager(tempDir, time.Duration(ttlMin)*time.Minute, maxMB<<20, clamd)
+		mgr = scan.NewManager(tempDir, time.Duration(ttlMin)*time.Minute, maxMB<<20, clamd, resultCache)
 		mgr.StartCleanup(ctx)
 		slog.Info("scan enabled", "clamd", clamdAddr, "max_mb", maxMB)
 	}
