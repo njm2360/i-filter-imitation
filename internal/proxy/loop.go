@@ -175,17 +175,22 @@ func loopWriteUpgradeHead(w io.Writer, resp *http.Response) {
 }
 
 // loopWriteHead writes the HTTP status line + response headers to w,
-// stripping hop-by-hop headers and adding Transfer-Encoding: chunked
-// when Content-Length is unknown.
+// stripping hop-by-hop headers and emitting explicit body framing.
+// The client connection is always HTTP/1.1, so the status line advertises 1.1
+// even when the upstream spoke HTTP/2 — otherwise we'd be handing the browser
+// an "HTTP/2.0" status line on a 1.1 byte stream.
 func loopWriteHead(w io.Writer, resp *http.Response) {
 	text := resp.Status
 	if text == "" {
 		text = http.StatusText(resp.StatusCode)
 	}
-	fmt.Fprintf(w, "HTTP/%d.%d %d %s\r\n", resp.ProtoMajor, resp.ProtoMinor, resp.StatusCode, text)
+	fmt.Fprintf(w, "HTTP/1.1 %d %s\r\n", resp.StatusCode, text)
 
 	for k, vv := range resp.Header {
 		if _, skip := hopHeaders[k]; skip {
+			continue
+		}
+		if strings.EqualFold(k, "Content-Length") {
 			continue
 		}
 		for _, v := range vv {
@@ -193,14 +198,16 @@ func loopWriteHead(w io.Writer, resp *http.Response) {
 		}
 	}
 
-	// Transport removes Transfer-Encoding after decoding; re-add chunked
-	// when body length is unknown. For streaming responses (e.g. SSE) where
-	// resp.Close is set, use Connection: close instead so the raw body bytes
-	// can be forwarded directly without chunked framing.
-	if resp.ContentLength < 0 && resp.StatusCode != http.StatusSwitchingProtocols {
-		if resp.Close {
+	// Emit explicit body framing. Without this, synthetic zero-body responses
+	// (e.g. the scan-redirect 302) leave the client waiting forever on a
+	// keep-alive connection.
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		switch {
+		case resp.ContentLength >= 0:
+			fmt.Fprintf(w, "Content-Length: %d\r\n", resp.ContentLength)
+		case resp.Close:
 			fmt.Fprint(w, "Connection: close\r\n")
-		} else {
+		default:
 			fmt.Fprint(w, "Transfer-Encoding: chunked\r\n")
 		}
 	}
