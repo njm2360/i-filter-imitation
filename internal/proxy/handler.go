@@ -28,12 +28,10 @@ type Server struct {
 	blocklist   *Blocklist
 	scanHandler http.Handler
 	pacContent  []byte // nil means PAC distribution is disabled
+	caCertPEM   []byte
+	caCertDER   []byte
 }
 
-// NewServer creates a Server. mgr may be nil to disable file scanning.
-// proxyAddr is the externally reachable address of this proxy (e.g. "http://192.168.1.1:8080"),
-// embedded in the scan-result HTML so the browser can fetch scan status directly.
-// pacContent may be nil to disable PAC file serving.
 const transportBufSize = 256 * 1024 // 256 KB — reduces syscall count ~64x vs the 4 KB default
 
 // rpBufPool provides reusable copy buffers for httputil.ReverseProxy to avoid
@@ -42,31 +40,27 @@ var rpBufPool = &sync.Pool{New: func() any { b := make([]byte, transportBufSize)
 
 type bufPool struct{}
 
-func (bufPool) Get() []byte        { return *rpBufPool.Get().(*[]byte) }
-func (bufPool) Put(b []byte)       { rpBufPool.Put(&b) }
+func (bufPool) Get() []byte  { return *rpBufPool.Get().(*[]byte) }
+func (bufPool) Put(b []byte) { rpBufPool.Put(&b) }
 
-func NewServer(cc *cert.Cache, sender *logger.Sender, bl *Blocklist, mgr *scan.Manager, proxyAddr string, pacContent []byte) *Server {
+func NewServer(cc *cert.Cache, sender *logger.Sender, bl *Blocklist, mgr *scan.Manager, pacContent []byte) *Server {
 	base := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		MaxIdleConnsPerHost:   128,
-		ReadBufferSize:        transportBufSize,
-		WriteBufferSize:       transportBufSize,
-		// Disable transparent gzip decompression: a MITM proxy must not alter
-		// content negotiation between client and server. Without this, Transport
-		// strips Content-Length (sizes differ after decompress), forcing the inner
-		// http.Server into chunked transfer encoding on every response.
-		DisableCompression: true,
+		TLSHandshakeTimeout: 10 * time.Second,
+		MaxIdleConnsPerHost: 128,
+		ReadBufferSize:      transportBufSize,
+		WriteBufferSize:     transportBufSize,
+		DisableCompression:  true,
 	}
 	tt := &timedTransport{base: base}
 
 	var tr http.RoundTripper = tt
 	var scanHandler http.Handler = http.NotFoundHandler()
 	if mgr != nil {
-		tr = &scanTransport{next: tt, manager: mgr, proxyAddr: proxyAddr}
+		tr = &scanTransport{next: tt, manager: mgr}
 		scanHandler = scan.NewHandler(mgr)
 	}
 
@@ -81,7 +75,18 @@ func NewServer(cc *cert.Cache, sender *logger.Sender, bl *Blocklist, mgr *scan.M
 		},
 	}
 
-	return &Server{certCache: cc, sender: sender, tt: tt, transport: tr, rp: rp, blocklist: bl, scanHandler: scanHandler, pacContent: pacContent}
+	return &Server{
+		certCache:   cc,
+		sender:      sender,
+		tt:          tt,
+		transport:   tr,
+		rp:          rp,
+		blocklist:   bl,
+		scanHandler: scanHandler,
+		pacContent:  pacContent,
+		caCertPEM:   cc.CACertPEM(),
+		caCertDER:   cc.CACertDER(),
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -90,10 +95,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Direct (non-proxied) request: r.URL.Host is empty.
-	// Serve internal scan endpoints only; reject everything else.
-	// This is how the I-Filter-style HTML file reaches status/download
-	// without going through the MITM tunnel.
+	if r.URL.Host == magicHost {
+		s.serveMagicHost(w, r)
+		return
+	}
+
 	if r.URL.Host == "" {
 		if strings.HasPrefix(r.URL.Path, scanPrefix) {
 			s.scanHandler.ServeHTTP(w, r)
@@ -101,15 +107,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if r.URL.Path == "/proxy.pac" && s.pacContent != nil {
 			w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
-			w.Write(s.pacContent)
+			w.Write(s.pacContent) //nolint:errcheck
 			return
 		}
 		http.NotFound(w, r)
 		return
 	}
 
-	// Proxied request: forward to upstream regardless of path,
-	// so /scan/ on a real server is never intercepted.
 	if r.URL.Scheme == "" {
 		r.URL.Scheme = "http"
 	}

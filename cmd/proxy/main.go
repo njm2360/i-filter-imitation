@@ -24,7 +24,6 @@ func main() {
 	defer stop()
 
 	listenAddr := envOr("LISTEN_ADDR", ":8080")
-	proxyAddr := envOr("PROXY_ADDR", deriveProxyAddr(listenAddr))
 	caCertPath := envOr("CA_CERT", "ca.crt")
 	caKeyPath := envOr("CA_KEY", "ca.key")
 	redisURL := envOr("REDIS_URL", "redis://localhost:6379")
@@ -69,7 +68,7 @@ func main() {
 		clamd := scan.NewClamdClient(network, address, 30*time.Second)
 		mgr = scan.NewManager(tempDir, time.Duration(ttlMin)*time.Minute, maxMB<<20, clamd)
 		mgr.StartCleanup(ctx)
-		slog.Info("scan enabled", "clamd", clamdAddr, "max_mb", maxMB, "proxy_addr", proxyAddr)
+		slog.Info("scan enabled", "clamd", clamdAddr, "max_mb", maxMB)
 	}
 
 	var pacContent []byte
@@ -92,7 +91,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    listenAddr,
-		Handler: proxy.NewServer(cache, sender, bl, mgr, proxyAddr, pacContent),
+		Handler: proxy.NewServer(cache, sender, bl, mgr, pacContent),
 	}
 
 	go func() {
@@ -117,15 +116,6 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
-}
-
-// deriveProxyAddr builds a default proxy address from the listen address.
-// ":8080" → "http://localhost:8080"
-func deriveProxyAddr(listenAddr string) string {
-	if strings.HasPrefix(listenAddr, ":") {
-		return "http://localhost" + listenAddr
-	}
-	return "http://" + listenAddr
 }
 
 // parseClamdAddr parses "unix:///path" → ("unix", "/path")

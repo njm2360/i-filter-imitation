@@ -239,3 +239,15 @@ func (c *Cache) generate(domain string) (*generatedCert, error) {
 
 	return &generatedCert{cert: tlsCert, certPEM: certPEM, keyPEM: keyPEM, notAfter: notAfter}, nil
 }
+
+// CACertPEM returns the PEM-encoded CA certificate used for MITM.
+func (c *Cache) CACertPEM() []byte { return c.ca.CertPEM }
+
+// CACertDER returns the DER-encoded CA certificate (raw ASN.1 bytes).
+func (c *Cache) CACertDER() []byte {
+	block, _ := pem.Decode(c.ca.CertPEM)
+	if block == nil {
+		return nil
+	}
+	return block.Bytes
+}

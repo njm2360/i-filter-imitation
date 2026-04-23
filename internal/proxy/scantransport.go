@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"strings"
 
@@ -11,9 +10,8 @@ import (
 
 // scanTransport wraps timedTransport and intercepts scannable download responses.
 type scanTransport struct {
-	next      http.RoundTripper
-	manager   *scan.Manager
-	proxyAddr string // e.g. "http://192.168.1.1:8080"
+	next    http.RoundTripper
+	manager *scan.Manager
 }
 
 func (t *scanTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -43,24 +41,21 @@ func (t *scanTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.handleCLI(req, resp)
 }
 
-// handleBrowser starts a background scan and delivers a downloadable HTML file
-// (I-Filter style). The browser downloads it, the user opens it from file://,
-// and the page polls the proxy directly via absolute URL — avoiding both the
-// /scan/ path-conflict issue and mixed-content restrictions.
+// handleBrowser starts a background scan and redirects the browser to the
+// scan result page hosted on the magic host (scan.invalid). The page polls
+// the proxy via same-origin relative URLs — no CORS or file:// workarounds needed.
 func (t *scanTransport) handleBrowser(req *http.Request, resp *http.Response) (*http.Response, error) {
 	job := t.manager.StartBrowserJob(req, resp)
-	html := scan.RenderScanPage(job.ID, job.Filename, t.proxyAddr)
-	htmlFilename := "Filter-Scan-Result.html"
+	location := "http://" + magicHost + scan.PathResult + "?id=" + job.ID
 	synth := &http.Response{
-		StatusCode:    http.StatusOK,
+		StatusCode:    http.StatusFound,
 		ProtoMajor:    resp.ProtoMajor,
 		ProtoMinor:    resp.ProtoMinor,
 		Header:        make(http.Header),
-		Body:          io.NopCloser(strings.NewReader(html)),
-		ContentLength: int64(len(html)),
+		Body:          http.NoBody,
+		ContentLength: 0,
 	}
-	synth.Header.Set("Content-Type", "text/html; charset=utf-8")
-	synth.Header.Set("Content-Disposition", `attachment; filename="`+htmlFilename+`"`)
+	synth.Header.Set("Location", location)
 	synth.Header.Set("X-Proxy-Scan", "pending:"+job.ID)
 	return synth, nil
 }

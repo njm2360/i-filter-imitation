@@ -3,6 +3,7 @@ package scan
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -11,6 +12,7 @@ const (
 	PathPrefix   = "/scan/"
 	PathStatus   = PathPrefix + "status"
 	PathDownload = PathPrefix + "download"
+	PathResult   = PathPrefix + "result"
 )
 
 // Handler serves the /scan/ internal endpoints.
@@ -24,11 +26,6 @@ func NewHandler(m *Manager) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Allow fetch() from file:// only (Origin: null).
-	// Wildcard would let any webpage on the LAN poll scan results.
-	w.Header().Set("Access-Control-Allow-Origin", "null")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -39,6 +36,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleStatus(w, r)
 	case PathDownload:
 		h.handleDownload(w, r)
+	case PathResult:
+		h.handleResult(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -92,11 +91,25 @@ func (h *Handler) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// RenderScanPage returns the HTML delivered to the browser as a downloadable file.
-// proxyAddr is the externally reachable proxy address (e.g. "http://192.168.1.1:8080").
-func RenderScanPage(jobID, filename, proxyAddr string) string {
-	statusURL := proxyAddr + PathStatus + "?id=" + jobID
-	downloadURL := proxyAddr + PathDownload + "?id=" + jobID
+// handleResult serves the scan-status HTML page for the given job ID.
+// The page uses same-origin relative URLs to poll status and trigger download.
+func (h *Handler) handleResult(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	job, ok := h.manager.GetJob(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	html := RenderScanPage(job.ID, job.Filename)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	io.WriteString(w, html) //nolint:errcheck
+}
+
+// RenderScanPage returns the HTML for the scan result page.
+// URLs are relative so the page works correctly when served from the magic host.
+func RenderScanPage(jobID, filename string) string {
+	statusURL := PathStatus + "?id=" + jobID
+	downloadURL := PathDownload + "?id=" + jobID
 	return fmt.Sprintf(scanPageTemplate,
 		filename,
 		fmt.Sprintf("%q", statusURL),

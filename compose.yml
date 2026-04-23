@@ -13,7 +13,6 @@ services:
       SCAN_MAX_SIZE_MB: "500"
       SCAN_TEMP_DIR: /tmp/scan
       SCAN_TTL_MINUTES: "60"
-      PROXY_ADDR: "http://localhost:8080"
       # BLOCK_LIST:       /data/blocklist.txt
       # SYSLOG_NET:       udp
       # SYSLOG_ADDR:      syslog:514
