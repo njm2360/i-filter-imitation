@@ -3,9 +3,9 @@ services:
   proxy:
     build: .
     ports:
-      - "8080:8080"
+      - "15080:15080"
     environment:
-      LISTEN_ADDR: ":8080"
+      LISTEN_ADDR: ":15080"
       CA_CERT: /data/ca/ca.crt
       CA_KEY: /data/ca/ca.key
       REDIS_URL: redis://redis:6379
