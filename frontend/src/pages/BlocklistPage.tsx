@@ -12,6 +12,12 @@ import { useToast } from '../components/Toast'
 import { StatusBadge } from '../components/StatusBadge'
 import type { Entry, AuditEntry } from '../types'
 
+const domainRe = /^(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9]{2,}$/
+
+function isValidDomain(value: string): boolean {
+  return domainRe.test(value.toLowerCase())
+}
+
 type SortKey = 'domain' | 'created_at' | 'updated_at'
 
 const formatDate = (iso: string) =>
@@ -46,6 +52,7 @@ export function BlocklistPage() {
   const [order, setOrder] = useState<'asc' | 'desc'>('desc')
 
   const [addDomain, setAddDomain] = useState('')
+  const [addDomainError, setAddDomainError] = useState('')
   const [addComment, setAddComment] = useState('')
   const [addLoading, setAddLoading] = useState(false)
 
@@ -109,10 +116,16 @@ export function BlocklistPage() {
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!addDomain.trim()) return
+    const trimmed = addDomain.trim()
+    if (!trimmed) return
+    if (!isValidDomain(trimmed)) {
+      setAddDomainError('無効な形式です。スキームやパスを含まない形式で入力してください（例: example.com、*.example.com）')
+      return
+    }
+    setAddDomainError('')
     setAddLoading(true)
     try {
-      const entry = await addBlocklistEntry(addDomain.trim(), addComment, actorName)
+      const entry = await addBlocklistEntry(trimmed, addComment, actorName)
       setEntries(prev => [entry, ...prev])
       setAddDomain('')
       setAddComment('')
@@ -222,7 +235,7 @@ export function BlocklistPage() {
             className="form-control"
             placeholder="ドメイン（例: *.example.com）"
             value={addDomain}
-            onChange={e => setAddDomain(e.target.value)}
+            onChange={e => { setAddDomain(e.target.value); setAddDomainError('') }}
             style={{ maxWidth: 280 }}
             required
           />
@@ -238,6 +251,9 @@ export function BlocklistPage() {
             {addLoading ? '登録中…' : '追加'}
           </button>
         </div>
+        {addDomainError && (
+          <div className="text-danger small mt-1">{addDomainError}</div>
+        )}
       </form>
 
       {/* フィルター */}

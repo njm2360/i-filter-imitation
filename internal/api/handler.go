@@ -6,9 +6,17 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+// domainRe accepts plain or wildcard hostnames: example.com, *.example.com, sub.example.com
+var domainRe = regexp.MustCompile(`^(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9]{2,}$`)
+
+func isValidDomain(domain string) bool {
+	return domainRe.MatchString(domain)
+}
 
 // NewHandler builds the HTTP mux for the API server.
 // apiKey is the expected bearer token; empty string disables auth.
@@ -85,6 +93,10 @@ func handleAdd(store *Store) http.HandlerFunc {
 		domain := strings.ToLower(strings.TrimSpace(body.Domain))
 		if domain == "" {
 			jsonError(w, "domain is required", http.StatusBadRequest)
+			return
+		}
+		if !isValidDomain(domain) {
+			jsonError(w, "invalid domain: must be a plain hostname (e.g. example.com or *.example.com), without scheme or path", http.StatusBadRequest)
 			return
 		}
 

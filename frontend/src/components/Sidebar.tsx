@@ -10,7 +10,7 @@ export function Sidebar() {
   return (
     <div className="d-flex flex-column bg-light border-end" style={{ width: 220, height: '100vh', position: 'sticky', top: 0, flexShrink: 0 }}>
       <div className="px-3 py-3 border-bottom">
-        <span className="fw-bold text-primary fs-6">i-Filter 管理</span>
+        <span className="fw-bold text-primary fs-6">Filter 管理</span>
       </div>
       <nav className="nav flex-column p-2 flex-grow-1">
         <NavLink to="/" end className={linkClass}>
