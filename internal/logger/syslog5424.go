@@ -28,7 +28,13 @@ func Format5424(r AccessRecord, hostname, appName, procID string) []byte {
 }
 
 func buildSD(r AccessRecord) string {
+	eventType := r.EventType
+	if eventType == "" {
+		eventType = "access"
+	}
 	fields := []struct{ k, v string }{
+		{"eventType", eventType},
+		{"blockReason", r.BlockReason},
 		{"requestId", r.RequestID},
 		{"clientIP", r.ClientIP},
 		{"xForwardedFor", r.XForwardedFor},

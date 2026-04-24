@@ -55,9 +55,26 @@ func (s *Server) serveConnLoop(conn net.Conn, scheme, host, tlsVer, tlsCiph stri
 			req.Host = host
 		}
 
-		if s.blocklist.IsBlocked(req.Host) {
+		if s.blocklist.Load().IsBlocked(req.Host) {
 			loopForbidden(conn, req.Host)
 			drainBody(req.Body)
+			clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+			s.emitLog(logger.AccessRecord{
+				Time:          time.Now(),
+				RequestID:     newRequestID(),
+				ClientIP:      clientIP,
+				XForwardedFor: req.Header.Get("X-Forwarded-For"),
+				Method:        req.Method,
+				Scheme:        scheme,
+				Host:          req.Host,
+				Path:          req.URL.RequestURI(),
+				StatusCode:    http.StatusForbidden,
+				UserAgent:     req.Header.Get("User-Agent"),
+				TLSVersion:    tlsVer,
+				TLSCipher:     tlsCiph,
+				EventType:     "block",
+				BlockReason:   "blocklist",
+			})
 			return
 		}
 

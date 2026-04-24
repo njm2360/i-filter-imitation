@@ -29,7 +29,6 @@ func main() {
 	redisURL := envOr("REDIS_URL", "redis://localhost:6379")
 	syslogNet := envOr("SYSLOG_NET", "udp")
 	syslogAddr := envOr("SYSLOG_ADDR", "")
-	blockListPath := envOr("BLOCK_LIST", "")
 	pacFilePath := envOr("PAC_FILE", "")
 
 	ca, err := cert.LoadOrCreate(caCertPath, caKeyPath)
@@ -45,12 +44,6 @@ func main() {
 	}
 	rdb := redis.NewClient(opt)
 
-	bl, err := proxy.LoadBlocklist(blockListPath)
-	if err != nil {
-		slog.Error("failed to load blocklist", "err", err)
-		os.Exit(1)
-	}
-
 	var mgr *scan.Manager
 	if clamdAddr := envOr("CLAMD_ADDR", ""); clamdAddr != "" {
 		network, address, err := parseClamdAddr(clamdAddr)
@@ -58,7 +51,6 @@ func main() {
 			slog.Error("invalid CLAMD_ADDR", "err", err)
 			os.Exit(1)
 		}
-		maxMB, _ := strconv.ParseInt(envOr("SCAN_MAX_SIZE_MB", "100"), 10, 64)
 		ttlMin, _ := strconv.ParseInt(envOr("SCAN_TTL_MINUTES", "60"), 10, 64)
 		tempDir := envOr("SCAN_TEMP_DIR", "/tmp/log-proxy-scan")
 		if err := os.MkdirAll(tempDir, 0o700); err != nil {
@@ -77,9 +69,10 @@ func main() {
 		resultCache.StartCleanup(ctx)
 
 		clamd := scan.NewClamdClient(network, address, 30*time.Second)
-		mgr = scan.NewManager(tempDir, time.Duration(ttlMin)*time.Minute, maxMB<<20, clamd, resultCache)
+		// MaxSize is seeded from DefaultScanConfig and overwritten by StartScanConfigSync.
+		mgr = scan.NewManager(tempDir, time.Duration(ttlMin)*time.Minute, scan.DefaultScanConfig().MaxSizeBytes(), clamd, resultCache)
 		mgr.StartCleanup(ctx)
-		slog.Info("scan enabled", "clamd", clamdAddr, "max_mb", maxMB)
+		slog.Info("scan enabled", "clamd", clamdAddr)
 	}
 
 	var pacContent []byte
@@ -100,9 +93,13 @@ func main() {
 		slog.Info("syslog enabled", "addr", syslogAddr)
 	}
 
+	proxyServer := proxy.NewServer(cache, sender, nil, mgr, pacContent)
+	proxyServer.StartBlocklistSync(ctx, rdb)
+	proxyServer.StartScanConfigSync(ctx, rdb, mgr)
+
 	srv := &http.Server{
 		Addr:    listenAddr,
-		Handler: proxy.NewServer(cache, sender, bl, mgr, pacContent),
+		Handler: proxyServer,
 	}
 
 	go func() {
@@ -114,7 +111,7 @@ func main() {
 	}()
 
 	<-ctx.Done()
-	stop() // release signal resources
+	stop()
 
 	slog.Info("shutting down")
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -129,8 +126,6 @@ func envOr(key, def string) string {
 	return def
 }
 
-// parseClamdAddr parses "unix:///path" → ("unix", "/path")
-// or "tcp://host:port" → ("tcp", "host:port").
 func parseClamdAddr(addr string) (network, address string, err error) {
 	switch {
 	case strings.HasPrefix(addr, "unix://"):

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/njm2360/i-filter-imitation/internal/logger"
 )
 
 // context keys for TLS metadata propagated into serveConnLoop
@@ -25,8 +26,23 @@ func newRequestID() string {
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	host := r.Host // "example.com:443"
 
-	if s.blocklist.IsBlocked(host) {
+	if s.blocklist.Load().IsBlocked(host) {
+		w.Header().Set("Connection", "close")
 		serveBlockedPage(w, host)
+		clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+		s.emitLog(logger.AccessRecord{
+			Time:          time.Now(),
+			RequestID:     newRequestID(),
+			ClientIP:      clientIP,
+			XForwardedFor: r.Header.Get("X-Forwarded-For"),
+			Method:        r.Method,
+			Scheme:        "https",
+			Host:          host,
+			StatusCode:    http.StatusForbidden,
+			UserAgent:     r.Header.Get("User-Agent"),
+			EventType:     "block",
+			BlockReason:   "blocklist",
+		})
 		return
 	}
 
@@ -66,7 +82,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	state := tlsConn.ConnectionState()
 
 	// Serve decrypted HTTP requests directly on the TLS connection.
-	s.serveConnLoop(tlsConn, "https", host, tlsVersionStr(state.Version), tlsCipherStr(state.CipherSuite))
+	s.serveConnLoop(tlsConn, "https", host, logger.TLSVersionString(state.Version), logger.TLSCipherString(state.CipherSuite))
 }
 
 // connWithReader wraps net.Conn to drain buffered bytes from a bufio.Reader first
@@ -91,26 +107,3 @@ func (c *connWithReader) RemoteAddr() net.Addr               { return c.conn.Rem
 func (c *connWithReader) SetDeadline(t time.Time) error      { return c.conn.SetDeadline(t) }
 func (c *connWithReader) SetReadDeadline(t time.Time) error  { return c.conn.SetReadDeadline(t) }
 func (c *connWithReader) SetWriteDeadline(t time.Time) error { return c.conn.SetWriteDeadline(t) }
-
-func tlsVersionStr(v uint16) string {
-	switch v {
-	case tls.VersionTLS10:
-		return "TLS1.0"
-	case tls.VersionTLS11:
-		return "TLS1.1"
-	case tls.VersionTLS12:
-		return "TLS1.2"
-	case tls.VersionTLS13:
-		return "TLS1.3"
-	default:
-		return fmt.Sprintf("TLS0x%04x", v)
-	}
-}
-
-func tlsCipherStr(id uint16) string {
-	name := tls.CipherSuiteName(id)
-	if name != "" {
-		return name
-	}
-	return fmt.Sprintf("0x%04x", id)
-}

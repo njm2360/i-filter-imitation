@@ -9,6 +9,7 @@ import (
 	"net/http/httputil"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/njm2360/i-filter-imitation/internal/cert"
@@ -25,7 +26,7 @@ type Server struct {
 	tt          *timedTransport
 	transport   http.RoundTripper // scanTransport or timedTransport; used by serveConnLoop
 	rp          *httputil.ReverseProxy
-	blocklist   *Blocklist
+	blocklist   atomic.Pointer[Blocklist]
 	scanHandler http.Handler
 	pacContent  []byte // nil means PAC distribution is disabled
 	caCertPEM   []byte
@@ -76,18 +77,21 @@ func NewServer(cc *cert.Cache, sender *logger.Sender, bl *Blocklist, mgr *scan.M
 		},
 	}
 
-	return &Server{
+	srv := &Server{
 		certCache:   cc,
 		sender:      sender,
 		tt:          tt,
 		transport:   tr,
 		rp:          rp,
-		blocklist:   bl,
 		scanHandler: scanHandler,
 		pacContent:  pacContent,
 		caCertPEM:   cc.CACertPEM(),
 		caCertDER:   cc.CACertDER(),
 	}
+	if bl != nil {
+		srv.blocklist.Store(bl)
+	}
+	return srv
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -128,8 +132,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Scheme == "" {
 		r.URL.Scheme = "http"
 	}
-	if s.blocklist.IsBlocked(r.Host) {
+	if s.blocklist.Load().IsBlocked(r.Host) {
 		serveBlockedPage(w, r.Host)
+		clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+		s.emitLog(logger.AccessRecord{
+			Time:          time.Now(),
+			RequestID:     newRequestID(),
+			ClientIP:      clientIP,
+			XForwardedFor: r.Header.Get("X-Forwarded-For"),
+			Method:        r.Method,
+			Scheme:        "http",
+			Host:          r.Host,
+			Path:          r.URL.RequestURI(),
+			StatusCode:    http.StatusForbidden,
+			UserAgent:     r.Header.Get("User-Agent"),
+			EventType:     "block",
+			BlockReason:   "blocklist",
+		})
 		return
 	}
 	s.handlePlain(w, r, "http", "")

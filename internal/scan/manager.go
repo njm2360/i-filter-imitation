@@ -80,7 +80,8 @@ type Scanner interface {
 type Manager struct {
 	dir     string
 	ttl     time.Duration
-	MaxSize int64
+	maxSize atomic.Int64
+	config  atomic.Pointer[ScanConfig]
 	clamd   Scanner
 	jobs    sync.Map     // map[string]*Job
 	cache   *ResultCache // nil = caching disabled
@@ -88,7 +89,24 @@ type Manager struct {
 
 // NewManager creates a Manager. dir is the temp file directory. cache may be nil.
 func NewManager(dir string, ttl time.Duration, maxSize int64, clamd Scanner, cache *ResultCache) *Manager {
-	return &Manager{dir: dir, ttl: ttl, MaxSize: maxSize, clamd: clamd, cache: cache}
+	m := &Manager{dir: dir, ttl: ttl, clamd: clamd, cache: cache}
+	m.maxSize.Store(maxSize)
+	cfg := DefaultScanConfig()
+	cfg.MaxSizeMB = maxSize >> 20
+	m.config.Store(cfg)
+	return m
+}
+
+// MaxSize returns the current max scan size in bytes.
+func (m *Manager) MaxSize() int64 { return m.maxSize.Load() }
+
+// Config returns the current ScanConfig.
+func (m *Manager) Config() *ScanConfig { return m.config.Load() }
+
+// SetConfig atomically replaces the ScanConfig and updates maxSize.
+func (m *Manager) SetConfig(cfg *ScanConfig) {
+	m.config.Store(cfg)
+	m.maxSize.Store(cfg.MaxSizeBytes())
 }
 
 // GetJob retrieves a job by ID.
@@ -200,7 +218,7 @@ func (m *Manager) runScan(job *Job, body io.ReadCloser, saveTail bool) {
 	fileAndHash := io.MultiWriter(cw, hw)
 
 	// Limit so we never buffer more than MaxSize bytes.
-	limited := io.LimitReader(body, m.MaxSize+1)
+	limited := io.LimitReader(body, m.MaxSize()+1)
 
 	ctx := context.Background()
 
@@ -210,7 +228,7 @@ func (m *Manager) runScan(job *Job, body io.ReadCloser, saveTail bool) {
 			tee := io.TeeReader(limited, fileAndHash)
 			io.Copy(io.Discard, tee) //nolint:errcheck
 
-			if cw.counter.Load() > m.MaxSize {
+			if cw.counter.Load() > m.MaxSize() {
 				if saveTail {
 					bodyOwned = false
 					job.tailBody = body
@@ -244,7 +262,7 @@ func (m *Manager) runScan(job *Job, body io.ReadCloser, saveTail bool) {
 	result, err := m.clamd.ScanReader(tee)
 
 	// If the stream was truncated (body had more than MaxSize bytes), handle remainder.
-	if cw.counter.Load() > m.MaxSize {
+	if cw.counter.Load() > m.MaxSize() {
 		if saveTail {
 			// CLI path: transfer body ownership to TrickleBody so it can chain the
 			// remaining bytes after the temp file content for complete delivery.

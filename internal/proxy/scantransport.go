@@ -26,12 +26,13 @@ func (t *scanTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	ct := resp.Header.Get("Content-Type")
-	if !isScannable(ct) {
+	cfg := t.manager.Config()
+	if !cfg.IsScannable(ct) {
 		return resp, nil
 	}
 
 	// Skip files that are known to exceed the size limit.
-	if resp.ContentLength > t.manager.MaxSize {
+	if resp.ContentLength > t.manager.MaxSize() {
 		return resp, nil
 	}
 
@@ -107,72 +108,4 @@ func (t *scanTransport) handleCLI(req *http.Request, resp *http.Response) (*http
 // includes text/html (i.e., it was sent by a browser).
 func isBrowserRequest(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
-}
-
-// isScannable returns true for Content-Types that ClamAV can meaningfully scan.
-// Images, audio, video, fonts, and plain-text data formats are excluded.
-func isScannable(ct string) bool {
-	// Strip parameters ("application/zip; charset=…" → "application/zip").
-	if i := strings.IndexByte(ct, ';'); i >= 0 {
-		ct = ct[:i]
-	}
-	ct = strings.TrimSpace(strings.ToLower(ct))
-	// Skip clearly safe types that ClamAV has no signatures for.
-	if strings.HasPrefix(ct, "image/") ||
-		strings.HasPrefix(ct, "audio/") ||
-		strings.HasPrefix(ct, "video/") ||
-		strings.HasPrefix(ct, "font/") {
-		return false
-	}
-	switch ct {
-	// Archives
-	case "application/zip",
-		"application/x-zip-compressed",
-		"application/vnd.rar",
-		"application/x-7z-compressed",
-		"application/x-tar",
-		"application/gzip",
-		"application/x-bzip2",
-		"application/x-xz",
-		"application/x-lzma",
-		"application/x-lzip",
-		"application/x-zstd",
-		"application/x-cab",
-		"application/vnd.ms-cab-compressed",
-		"application/x-iso9660-image",
-		"application/x-apple-diskimage",
-		// Executables / binaries
-		"application/octet-stream",
-		"binary/octet-stream",
-		"application/x-msdownload",
-		"application/x-dosexec",
-		"application/x-executable",
-		"application/x-msi",
-		"application/x-ms-installer",
-		"application/vnd.microsoft.portable-executable",
-		// Documents
-		"application/pdf",
-		"application/rtf",
-		"text/rtf",
-		"application/msword",
-		"application/vnd.ms-excel",
-		"application/vnd.ms-powerpoint",
-		"application/vnd.ms-office",
-		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
-		// Java / Android
-		"application/java-archive",
-		"application/x-java-archive",
-		"application/vnd.android.package-archive",
-		// Email
-		"message/rfc822",
-		"application/vnd.ms-outlook":
-		return true
-	}
-	// application/x-* covers scripts, installers, etc. not listed above.
-	if strings.HasPrefix(ct, "application/x-") {
-		return true
-	}
-	return false
 }
