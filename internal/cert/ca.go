@@ -66,12 +66,12 @@ func generate(certPath, keyPath string) (*CA, error) {
 		return nil, err
 	}
 
-	now := time.Now()
+	now := time.Now().Truncate(time.Second)
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
-			CommonName:   "Encrypt-Proxy Local CA",
-			Organization: []string{"Encrypt-Proxy"},
+			CommonName:   "Filter Proxy Local CA",
+			Organization: []string{"njm2360"},
 		},
 		NotBefore:             now,
 		NotAfter:              now.Add(10 * 365 * 24 * time.Hour),
