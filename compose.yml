@@ -17,6 +17,7 @@ services:
       SCAN_TTL_MINUTES: "60"
       # SYSLOG_NET: udp
       # SYSLOG_ADDR: syslog:514
+      # SYSLOG_HOSTNAME: filter-proxy
     volumes:
       - ca_data:/data/ca
     depends_on:
@@ -45,7 +46,7 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/healthz || exit 1"]
+      test: [ "CMD-SHELL", "curl -sf http://localhost:8080/healthz || exit 1" ]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -72,7 +73,7 @@ services:
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -82,7 +83,7 @@ services:
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
       timeout: 3s
       retries: 10

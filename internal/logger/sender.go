@@ -23,8 +23,12 @@ type Sender struct {
 
 // NewSender creates a Sender and starts the background drain goroutine.
 // bufSize controls how many records can queue before Send() drops.
+// Set SYSLOG_HOSTNAME env var to override the hostname in syslog messages.
 func NewSender(network, raddr string, bufSize int) *Sender {
-	hostname, _ := os.Hostname()
+	hostname := os.Getenv("SYSLOG_HOSTNAME")
+	if hostname == "" {
+		hostname, _ = os.Hostname()
+	}
 	s := &Sender{
 		network:  network,
 		raddr:    raddr,
