@@ -5,3 +5,10 @@ docs/
 compose.yml
 Dockerfile
 data/
+
+.env
+.env.*
+!.env.example
+
+frontend/node_modules
+frontend/dist
