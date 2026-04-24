@@ -26,26 +26,6 @@ func newRequestID() string {
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	host := r.Host // "example.com:443"
 
-	if s.blocklist.Load().IsBlocked(host) {
-		w.Header().Set("Connection", "close")
-		serveBlockedPage(w, host)
-		clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-		s.emitLog(logger.AccessRecord{
-			Time:          time.Now(),
-			RequestID:     newRequestID(),
-			ClientIP:      clientIP,
-			XForwardedFor: r.Header.Get("X-Forwarded-For"),
-			Method:        r.Method,
-			Scheme:        "https",
-			Host:          host,
-			StatusCode:    http.StatusForbidden,
-			UserAgent:     r.Header.Get("User-Agent"),
-			EventType:     "block",
-			BlockReason:   "blocklist",
-		})
-		return
-	}
-
 	rc := http.NewResponseController(w)
 	conn, bufrw, err := rc.Hijack()
 	if err != nil {
